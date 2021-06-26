@@ -1,21 +1,23 @@
 import numpy as np
 import dask
 import dask.array as da
+import dask.delayed as delayed
 import ClusterWrap
 import time
 import fishspot.filter as fs_filter
 import fishspot.psf as fs_psf
 import fishspot.detect as fs_detect
+import fishspot.assign as fs_assign
 
 
 def distributed_spot_detection(
     array, blocksize,
-    crop=None,
     white_tophat_args={},
     psf_estimation_args={},
     deconvolution_args={},
     spot_detection_args={},
     cluster_kwargs={},
+    mask=None,
     psf=None,
     psf_retries=3,
 ):
@@ -43,8 +45,31 @@ def distributed_spot_detection(
     # compute overlap depth
     overlap = 2*spot_detection_args['max_blob_radius']
 
+    # compute mask to array ratio
+    if mask is not None:
+        ratio = np.array(mask.shape) / array.shape
+
     # pipeline to run on each block
-    def detect_spots_pipeline(block, psf=None, block_info=None):
+    def detect_spots_pipeline(block, mask=None, psf=None, block_info=None):
+
+        # get origin (used a few times later)
+        origin = np.array(block_info[0]['chunk-location'])
+        origin = origin * blocksize - overlap
+
+        # check mask
+        if mask is not None:
+            mo = np.round(origin * ratio).astype(np.uint16)
+            mo = np.maximum(0, mo)
+            ms = np.round(blocksize * ratio).astype(np.uint16)
+            mask_block = mask[mo[0]:mo[0]+ms[0],
+                              mo[1]:mo[1]+ms[1],
+                              mo[2]:mo[2]+ms[2],]
+
+            # if there is no foreground, return null result
+            if np.sum(mask_block) < 1:
+                result = np.empty((1,1,1), dtype=list)
+                result[0, 0, 0] = [np.zeros((0, 4)), psf]
+                return result
 
         # background subtraction: white tophat filter
         wth = fs_filter.white_tophat(block, **white_tophat_args)
@@ -59,7 +84,6 @@ def distributed_spot_detection(
                         psf_estimation_args['inlier_threshold'] = 0.9
                     psf_estimation_args['inlier_threshold'] -= 0.1
                 else: break
-        # TODO: HANDLE SITUATION WHEN THERE IS STILL NO PSF
 
         # deconvolution
         decon = fs_filter.rl_decon(wth, psf, **deconvolution_args)
@@ -77,8 +101,6 @@ def distributed_spot_detection(
             spots = spots[spots[:, i] < overlap + blocksize[i]]
 
         # adjust for block origin
-        origin = np.array(block_info[0]['chunk-location'])
-        origin = origin * blocksize - overlap
         if spots.shape[0] > 0:
             spots[:, :3] = spots[:, :3] + origin
 
@@ -90,7 +112,7 @@ def distributed_spot_detection(
     # construct cluster
     with ClusterWrap.cluster(**cluster_kwargs) as cluster:
 
-        # wrap input array properly
+        # a test dataset as a numpy array
         if isinstance(array, np.ndarray):
             future = cluster.client.scatter(array)
             array_da = da.from_delayed(
@@ -100,14 +122,18 @@ def distributed_spot_detection(
             array_da.persist()
             time.sleep(5)  ### a little time for workers to be allocated
             cluster.client.rebalance()
+
+        # a full dataset as a zarr array
         else:
             array_da = da.from_array(array, chunks=blocksize)
-            if crop is not None:
-                array_da = array_da[tuple(crop)].rechunk(blocksize)
+
+        # delay mask
+        mask_d = delayed(mask) if mask is not None else None
 
         # execute spot detection on all blocks
         spots_as_grid = da.map_overlap(
             detect_spots_pipeline, array_da,
+            mask=mask_d,
             psf=psf,
             depth=overlap,
             dtype=list,  ### dask generalizes to object
@@ -126,10 +152,11 @@ def distributed_spot_detection(
     # concatenate all spots into single array
     spots = np.vstack(spots_list)
 
-    # adjust for crop origin
-    if crop is not None:
-        origin = np.array([s.start for s in crop])
-        spots[:, :3] = spots[:, :3] + origin
+    # filter with foreground mask
+    if mask is not None:
+        spots = fs_assign.apply_foreground_mask(
+            spots, mask, ratio,
+        )
 
     # average over all psf estimates
     psf = np.mean(psf_list, axis=0)
