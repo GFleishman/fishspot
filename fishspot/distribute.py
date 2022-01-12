@@ -7,7 +7,7 @@ import time
 import fishspot.filter as fs_filter
 import fishspot.psf as fs_psf
 import fishspot.detect as fs_detect
-import fishspot.assign as fs_assign
+import fishspot.filter_spots as filter_spots
 
 
 def distributed_spot_detection(
@@ -91,10 +91,6 @@ def distributed_spot_detection(
         # blob detection
         spots = fs_detect.detect_spots_log(decon, **spot_detection_args)
 
-        # make sure dimensions are compatible
-        if spots.shape == (0, 3):
-            spots = np.zeros((0, 4))
-
         # remove spots in the halo
         for i in range(3):
             spots = spots[spots[:, i] > overlap - 1]
@@ -154,7 +150,7 @@ def distributed_spot_detection(
 
     # filter with foreground mask
     if mask is not None:
-        spots = fs_assign.apply_foreground_mask(
+        spots = filter_spots.apply_foreground_mask(
             spots, mask, ratio,
         )
 
