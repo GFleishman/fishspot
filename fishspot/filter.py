@@ -21,5 +21,15 @@ def rl_decon(image, psf, **kwargs):
         in_range=(0, image.max()),
         out_range=(0, 1),
     )
-    return richardson_lucy(norm_image, psf, **kwargs)
+
+    # pad edges
+    pad = [(x, x) for x in psf.shape]
+    norm_image = np.pad(norm_image, pad, mode='reflect')
+
+    # run decon
+    decon = richardson_lucy(norm_image, psf, **kwargs)
+
+    # slice off pads and return
+    slc = tuple(slice(x[0], -x[1]) for x in pad)
+    return decon[slc]
 
