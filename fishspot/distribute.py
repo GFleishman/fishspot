@@ -68,7 +68,7 @@ def distributed_spot_detection(
             # if there is no foreground, return null result
             if np.sum(mask_block) < 1:
                 result = np.empty((1,1,1), dtype=list)
-                result[0, 0, 0] = [np.zeros((0, 4)), psf]
+                result[0, 0, 0] = [np.zeros((0, 5)), psf]
                 return result
 
         # background subtraction: white tophat filter
