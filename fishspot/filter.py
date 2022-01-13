@@ -16,20 +16,13 @@ def rl_decon(image, psf, **kwargs):
     """
     """
 
+    # normalize image
     norm_image = rescale_intensity(
         image,
         in_range=(0, image.max()),
         out_range=(0, 1),
     )
 
-    # pad edges
-    pad = [(x, x) for x in psf.shape]
-    norm_image = np.pad(norm_image, pad, mode='reflect')
-
     # run decon
-    decon = richardson_lucy(norm_image, psf, **kwargs)
-
-    # slice off pads and return
-    slc = tuple(slice(x[0], -x[1]) for x in pad)
-    return decon[slc]
+    return richardson_lucy(norm_image, psf, **kwargs)
 

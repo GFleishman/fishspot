@@ -91,6 +91,15 @@ def distributed_spot_detection(
         # blob detection
         spots = fs_detect.detect_spots_log(decon, **spot_detection_args)
 
+        # if no spots are found, ensure consistent format
+        if spots.shape == (0, 3):
+            spots = np.zeros((0, 5))
+        else:
+            # append image intensities
+            coords = spots[:, :3].astype(int)
+            intensities = block[coords[:, 0], coords[:, 1], coords[:, 2]]
+            spots = np.concatenate((spots, intensities[..., None]), axis=1)
+
         # remove spots in the halo
         for i in range(3):
             spots = spots[spots[:, i] > overlap - 1]

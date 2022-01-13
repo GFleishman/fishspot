@@ -29,17 +29,5 @@ def detect_spots_log(
         kwargs['overlap'] = 0.8
 
     # run
-    spots = blob_log(image, **kwargs)
-
-    # if no spots found, return null result
-    if spots.shape == (0, 3):
-        return np.zeros((0, 5))
-
-    # get intensities, add to spots array
-    coords = spots[:, :3].astype(int)
-    intensities = image[coords[:, 0], coords[:, 1], coords[:, 2]]
-    spots = np.concatenate((spots, intensities[..., None]), axis=1)
-
-    # return
-    return spots
+    return blob_log(image, **kwargs)
 
