@@ -26,6 +26,7 @@ def rl_decon(image, psf, **kwargs):
     # run decon
     return richardson_lucy(norm_image, psf, **kwargs)
 
+
 def wiener_decon(image, psf, nsr=1e-3):
     """
     """
