@@ -2,6 +2,12 @@ import numpy as np
 from skimage.feature import blob_log
 
 
+# TODO: potential major improvement - after finding coordinates
+#       with LoG filter, template match the PSF to the region around
+#       each detected point (Fourier Phase Correlation maybe?).
+#       upsample the PSF and data to achieve subvoxel accuracy.
+
+
 def detect_spots_log(
     image,
     min_blob_radius,

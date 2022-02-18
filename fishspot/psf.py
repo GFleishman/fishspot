@@ -21,6 +21,9 @@ def estimate_psf(image, radius, n_spots=2000, **kwargs):
     """
     """
 
+    # TODO: consider DoG filter before local max filter for
+    #       finding weak spot list
+
     # get weak spots
     max_image = maximum_filter(image, size=radius)
     spots = np.column_stack(np.nonzero(image == max_image))
