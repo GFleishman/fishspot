@@ -10,29 +10,37 @@ from skimage.feature import blob_log
 
 def detect_spots_log(
     image,
-    min_blob_radius,
-    max_blob_radius,
+    min_radius,
+    max_radius,
+    num_sigma=5,
     **kwargs,
 ):
     """
     """
 
-    # compute defaults
-    min_blob_radius = np.array(min_blob_radius)
-    max_blob_radius = np.array(max_blob_radius)
-    min_sigma = 0.8 * min_blob_radius / np.sqrt(3)
-    max_sigma = 1.2 * max_blob_radius / np.sqrt(3)
-    num_sigma = int(np.ceil(np.max(max_blob_radius - min_blob_radius)))
+    # ensure iterable radii
+    if not isinstance(min_radius, (tuple, list, np.ndarray)):
+        min_radius = (min_radius,)*image.ndim
+    if not isinstance(max_radius, (tuple, list, np.ndarray)):
+        max_radius = (max_radius,)*image.ndim
 
-    # set defaults
-    if 'min_sigma' not in kwargs:
-        kwargs['min_sigma'] = min_sigma
-    if 'max_sigma' not in kwargs:
-        kwargs['max_sigma'] = max_sigma
-    if 'num_sigma' not in kwargs:
-        kwargs['num_sigma'] = num_sigma
+    # compute defaults
+    min_radius = np.array(min_radius)
+    max_radius = np.array(max_radius)
+    min_sigma = 0.8 * min_radius / np.sqrt(image.ndim)
+    max_sigma = 1.2 * max_radius / np.sqrt(image.ndim)
+
+    # set given arguments
+    kwargs['min_sigma'] = min_sigma
+    kwargs['max_sigma'] = max_sigma
+    kwargs['num_sigma'] = num_sigma
+
+    # set additional defaults
     if 'overlap' not in kwargs:
-        kwargs['overlap'] = 0.8
+        kwargs['overlap'] = 1.0
+    if 'threshold' not in kwargs:
+        kwargs['threshold'] = None
+        kwargs['threshold_rel'] = 0.1
 
     # run
     return blob_log(image, **kwargs)
