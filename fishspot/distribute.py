@@ -6,7 +6,6 @@ from itertools import product
 import fishspot.filter as fs_filter
 import fishspot.psf as fs_psf
 import fishspot.detect as fs_detect
-import fishspot.filter_spots as filter_spots
 
 
 @cluster
@@ -16,6 +15,7 @@ def distributed_spot_detection(
     psf_estimation_args={},
     deconvolution_args={},
     spot_detection_args={},
+    intensity_threshold=0,
     mask=None,
     psf=None,
     psf_retries=3,
@@ -79,12 +79,9 @@ def distributed_spot_detection(
     # pipeline to run on each block
     def detect_spots_pipeline(coords, psf):
 
-        # read the data
+        # load data, background subtract, deconvolve, detect blobs
         block = array[coords]
-
-        # background subtraction: white tophat filter
         wth = fs_filter.white_tophat(block, **white_tophat_args)
-
         if psf is None:
             # automated psf estimation with error handling
             for i in range(psf_retries):
@@ -95,12 +92,8 @@ def distributed_spot_detection(
                         psf_estimation_args['inlier_threshold'] = 0.9
                     psf_estimation_args['inlier_threshold'] -= 0.1
                 else: break
-
-        # deconvolution
         decon = fs_filter.rl_decon(wth, psf, **deconvolution_args)
-
-        # blob detection
-        spots = fs_detect.detect_spots_log(decon * block, **spot_detection_args)
+        spots = fs_detect.detect_spots_log(decon, **spot_detection_args)
 
         # if no spots are found, ensure consistent format
         if spots.shape[0] == 0:
@@ -110,6 +103,7 @@ def distributed_spot_detection(
             spot_coords = spots[:, :3].astype(int)
             intensities = block[spot_coords[:, 0], spot_coords[:, 1], spot_coords[:, 2]]
             spots = np.concatenate((spots, intensities[..., None]), axis=1)
+            spots = spots[ spots[..., -1] > intensity_threshold ]
 
             # adjust for block origin
             origin = np.array([x.start for x in coords])
@@ -137,7 +131,7 @@ def distributed_spot_detection(
 
     # filter with foreground mask
     if mask is not None:
-        spots = filter_spots.apply_foreground_mask(
+        spots = fs_filter.apply_foreground_mask(
             spots, mask, ratio,
         )
 
