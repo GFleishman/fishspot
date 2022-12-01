@@ -85,13 +85,12 @@ def density_filter(spots, radius, neighbor_threshold):
     # get spot-to-spot distances
     tree = cKDTree(spots[:, :3])
     dok = tree.sparse_distance_matrix(tree, radius)
-    dok.setdiag(np.finfo(spots.dtype).eps)  # to distinguish from fill value
     csr = dok.tocsr()
 
     # determine loner spots, remove them and return
     density_filter = np.ones(spots.shape[0], dtype=bool)
     for iii in range(spots.shape[0]):
-        if csr[iii].count_nonzero() - 1 < neighbor_threshold:
+        if csr[iii].count_nonzero() < neighbor_threshold:
             density_filter[iii] = False
     return spots[density_filter]
 

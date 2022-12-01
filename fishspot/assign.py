@@ -13,7 +13,6 @@ def gravity_flow(
     max_step,
     max_displacement,
     mask_density,
-    free_iteration_percentage=0.1,
     callback=None,
 ):
     """
@@ -39,34 +38,28 @@ def gravity_flow(
         sitk_image = sitk.SmoothingRecursiveGaussian(sitk_image, sigma=sigma)
         density = sitk.GetArrayFromImage(sitk_image)
     
-        # cut out only regions around spots, ignore trapped spots
-        if iii < round( iterations * free_iteration_percentage ):
-            trapped = np.zeros(coords.shape[0], dtype=bool)
-        else:
-            trapped = masks_binary[coords[:, 0], coords[:, 1], coords[:, 2]].astype(bool)
-        coords = coords[~trapped]
         crops = np.empty((len(coords), 3, 3, 3), dtype=density.dtype)
         for jjj, coord in enumerate(coords):
             crops[jjj] = density[coord[0]-1:coord[0]+2,
                                  coord[1]-1:coord[1]+2,
                                  coord[2]-1:coord[2]+2]
             
-        # print some feedback
-        print(iii, ": ", np.sum(trapped) / len(trapped))
-
         # get density gradient at spot locations, apply max_step
         grad = np.array(np.gradient(crops, *spacing, axis=(1, 2, 3))).transpose(1,2,3,4,0)
         grad = grad[:, 1, 1, 1, :].squeeze()
         grad_mag = np.linalg.norm(grad, axis=-1)
-        grad *= learning_rate / np.mean(grad_mag)
+        scale_factor = learning_rate / np.mean(grad_mag)
+        grad *= scale_factor
+        grad_mag *= scale_factor  # scaling a vector equivalently scales its magnitude
         too_big = grad_mag > max_step
         grad[too_big] = grad[too_big] * max_step / grad_mag[too_big][..., None]
-    
+
         # don't move anything too far
-        displacements = spots_updated[~trapped] + grad
-        too_far = np.linalg.norm(displacements - spots[:, :3][~trapped], axis=-1) > max_displacement
+        displacements = spots_updated + grad
+        too_far = np.linalg.norm(displacements - spots[:, :3], axis=-1) > max_displacement
         grad[too_far] = 0
-        spots_updated[~trapped] -= grad
+        print(f'iteration: {iii}    gradient size: {np.sum(grad**2)}')
+        spots_updated += grad
 
         # run callback function
         if callback is not None: callback(**locals())
@@ -80,7 +73,10 @@ def gravity_flow(
 
     assignments = masks[coords[:, 0], coords[:, 1], coords[:, 2]]
     counts = np.zeros(masks.max(), dtype=np.uint16)
-    for assignment in assignments: counts[assignment] += 1
+    for assignment in assignments:
+        if assignment > 0: counts[assignment - 1] += 1
+
+    # TODO: add something which introspects the unassigned spot locations
     return counts, assignments
 
 
