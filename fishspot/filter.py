@@ -1,5 +1,6 @@
 import numpy as np
-from skimage.morphology import white_tophat as skimage_white_tophat
+import cupy as cp
+from cucim.skimage.morphology import white_tophat as cucim_white_tophat
 from skimage.exposure import rescale_intensity
 from skimage.restoration import richardson_lucy
 from scipy.spatial import cKDTree
@@ -19,7 +20,7 @@ def white_tophat(image, radius):
     shape = [2*r+1 for r in radius]
 
     # run white tophat
-    return skimage_white_tophat(image, footprint=np.ones(shape))
+    return cucim_white_tophat(cp.array(image), footprint=cp.ones(shape)).get()
 
 
 def rl_decon(image, psf, **kwargs):
@@ -75,7 +76,7 @@ def percentile_filter(spots, percentile):
     """
 
     thresh = np.percentile(spots[:, -1], percentile)
-    return spots[ spots[:, -1] >= thresh ]
+    return spots[spots[:, -1] >= thresh]
 
 
 def density_filter(spots, radius, neighbor_threshold):
@@ -155,8 +156,8 @@ def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8):
     # get histogram, get point, return threshold
     foreground = image[mask > 0] if mask is not None else image
     mn, mx = np.percentile(foreground, winsorize).astype(int)
-    hist, edges = np.histogram(foreground, bins=mx - mn, range=(mn, mx), density=True)
+    hist, edges = np.histogram(
+        foreground, bins=mx - mn, range=(mn, mx), density=True)
     hist = gaussian_filter(hist, sigma=sigma)
     edges = edges[1:]
     return edges[get_point(hist, edges)]
-

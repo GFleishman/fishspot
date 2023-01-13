@@ -1,5 +1,6 @@
 import numpy as np
-from skimage.feature import blob_log
+from cucim.skimage.feature import blob_log as cucim_blob_log
+import cupy as cp
 
 
 # TODO: potential major improvement - after finding coordinates
@@ -43,5 +44,4 @@ def detect_spots_log(
         kwargs['threshold_rel'] = 0.1
 
     # run
-    return blob_log(image, **kwargs)
-
+    return cucim_blob_log(cp.array(image), **kwargs).get()
