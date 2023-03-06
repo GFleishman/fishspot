@@ -16,6 +16,38 @@ def gravity_flow(
     callback=None,
 ):
     """
+    Assign coordinate data to segment data by flowing coordinates along gravity gradients
+
+    Parameters
+    ----------
+    spots : 2d array, Nxd for N spots in d dimensions
+        The spots we want to assign
+
+    masks : nd-array
+        The multi-integer map of masks we want to assign spots to
+
+    spacing : 1d-array
+        The voxel spacing of the masks image
+
+    iterations : int
+        The number of iterations to run the flow
+
+    sigma : float
+        The standard deviation of the Gaussian applied to spots to form potential field
+
+    learning_rate :
+
+    max_step :
+
+    max_displacement :
+
+    mask_density :
+
+    callback : function (default: None)
+
+    Returns
+    -------
+    
     """
 
     masks_binary = masks > 0
