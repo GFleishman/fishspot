@@ -20,7 +20,12 @@ def white_tophat(image, radius):
     shape = [2*r+1 for r in radius]
 
     # run white tophat
-    return cucim_white_tophat(cp.array(image), footprint=cp.ones(shape)).get()
+    i = cp.array(image)
+    f = cp.ones(shape)
+    result = cucim_white_tophat(i, footprint=f).get()
+    i = None
+    f = None
+    return result
 
 
 def rl_decon(image, psf, **kwargs):

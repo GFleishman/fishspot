@@ -43,5 +43,23 @@ def detect_spots_log(
         kwargs['threshold'] = None
         kwargs['threshold_rel'] = 0.1
 
+    # print(image.shape)
+    # result = []
+    # if len(image.shape) == 3:
+    #     for i in range(image.shape[0]):
+    #         seq = cucim_blob_log(cp.array(image[i,:,:]), **kwargs).get()
+    #         seq = np.insert(seq, 0, values=i, axis=1)
+    #         result.append(seq)
+    #         print(i, len(result), seq.shape)
+
+    # # print(result)
+    # return np.concatenate(result, axis=0)
+    
+    # run white tophat
+    i = cp.array(image)
+    result = cucim_blob_log(i, **kwargs).get()
+    del i
+    return result
+    
     # run
-    return cucim_blob_log(cp.array(image), **kwargs).get()
+    # return cucim_blob_log(cp.array(image), **kwargs).get()
