@@ -1,9 +1,144 @@
 import numpy as np
 import SimpleITK as sitk
 from scipy.ndimage import find_objects
+from scipy.ndimage import shift
+from scipy.ndimage import convolve
+from scipy.ndimage import map_coordinates
+from scipy.ndimage import distance_transform_edt
 
 
 def gravity_flow(
+    spots,
+    masks,
+    spacing,
+    iterations,
+    learning_rate,
+    max_displacement,
+    mask_density=1.0,
+    callback=None,
+):
+    """
+    Assign coordinate data to segment data by flowing coordinates along gravity gradients
+
+    Parameters
+    ----------
+    spots : 2d array, Nxd for N spots in d dimensions
+        The spots we want to assign
+
+    masks : nd-array
+        The multi-integer map of masks we want to assign spots to
+
+    spacing : 1d-array
+        The voxel spacing of the masks image
+
+    iterations : int
+        The number of iterations to run the flow
+
+    learning_rate : float
+        At each iteration the spot displacements will be scaled such that the
+        largest displacement of any spot will be equal to this number in micrometers
+
+    max_displacement : float
+        No spot will be allowed to displace larger than this amount in micrometers
+
+    mask_density : float (default: 1.0)
+        A multiplier applied to the mask distance transform. If you want to increase
+        the mask-to-spot forces relative to the spot-to-spot forces, increase this number.
+        Alternatively if you want to decrease the mask-to-spot forces relative to the
+        spot-to-spot forces, decrease this number. Mask-to-spot forces promote assignment
+        and spot-to-spot forces promote clustering.
+
+    callback : function (default: None)
+        Any function you want to be run at the end of each iteration.
+
+    Returns
+    -------
+    
+    
+    """
+
+    # TODO: add automatic stopping criteria based on percentage of spots assigned
+    #       that number should converge eventually
+
+    # the constant mask density
+    masks_binary = masks > 0
+    masks_edt = distance_transform_edt(masks_binary, sampling=spacing)
+
+    # unit mass
+    unit_mass = np.zeros((3,) * masks.ndim)
+    unit_mass[(slice(1, 2),) * masks.ndim] = 1
+
+    # spots in voxel units
+    coords = spots[:, :3] / spacing
+    coords_updated = np.copy(coords)
+    forces = np.empty_like(coords_updated)
+
+    # construct the linear filter
+    center = []
+    for x in np.array(masks.shape) / 2:
+        if x % 1 == 0: center.append(slice(int(x)-1, int(x)+1))
+        else: center.append(slice(int(x), int(x)+1))
+    center = tuple(center)
+    linear_filter = np.ones(masks.shape, dtype=np.float64)
+    linear_filter[center] = 0
+    linear_filter = distance_transform_edt(linear_filter, sampling=spacing)**-1
+    x, y = np.partition(np.unique(linear_filter), -3)[-3:-1]
+    linear_filter[center] = 2*y - x
+    linear_filter = linear_filter / np.sum(linear_filter)
+    linear_filter_fft = np.fft.rfftn(np.fft.fftshift(linear_filter))
+
+    # convert max_displacement to voxel units
+    max_displacement = np.max(max_displacement / spacing)
+
+    # begin flow
+    for iii in range(iterations):
+
+        # get density
+        density = mask_density * masks_edt
+        centers = np.around(coords_updated).astype(int)
+        deltas = coords_updated - centers
+        for center, delta in zip(centers, deltas):
+            shifted_mass = shift(unit_mass, delta)
+            density[tuple(slice(c-1, c+2) for c in center)] += shifted_mass
+
+        # convert to potential, then forces
+        potential = np.fft.irfftn( np.fft.rfftn(density) * linear_filter_fft, density.shape)
+        force_field = np.array(np.gradient(potential, *spacing)).transpose(1,2,3,0)
+        for jjj in range(3):
+            forces[..., jjj] = map_coordinates(force_field[..., jjj], coords_updated.transpose())
+
+        # scale forces, convert to voxel units, truncate total displacements
+        forces_mag = np.linalg.norm(forces, axis=-1)
+        forces = forces * (learning_rate / np.max(forces_mag) / spacing)
+        displacements = coords_updated + forces
+        too_far = np.linalg.norm(displacements - coords, axis=-1) > max_displacement
+        forces[too_far] = 0
+        out_of_bounds = np.any(displacements < 1, axis=1)
+        out_of_bounds += np.any(displacements > (np.array(density.shape) - 2), axis=1)
+        forces[out_of_bounds] = 0
+
+        # count number of assigned spots
+        x = np.around(coords_updated).astype(int)
+        perc = np.sum(masks_binary[x[:, 0], x[:, 1], x[:, 2]]) / coords_updated.shape[0]
+        print(f'iteration: {iii}    percent spots assigned: {perc}')
+
+        # update coordinates
+        coords_updated = coords_updated + forces
+
+        # run callback function
+        if callback is not None: callback(**locals())
+
+    coords_updated = np.around(coords_updated).astype(int)
+    assignments = masks[coords_updated[:, 0], coords_updated[:, 1], coords_updated[:, 2]]
+    counts = np.zeros(masks.max(), dtype=np.uint16)
+    for assignment in assignments:
+        if assignment > 0: counts[assignment - 1] += 1
+
+    # TODO: add something which introspects the unassigned spot locations
+    return counts, assignments
+
+
+def gravity_flow_old(
     spots,
     masks,
     spacing,
@@ -75,7 +210,7 @@ def gravity_flow(
             crops[jjj] = density[coord[0]-1:coord[0]+2,
                                  coord[1]-1:coord[1]+2,
                                  coord[2]-1:coord[2]+2]
-            
+
         # get density gradient at spot locations, apply max_step
         grad = np.array(np.gradient(crops, *spacing, axis=(1, 2, 3))).transpose(1,2,3,4,0)
         grad = grad[:, 1, 1, 1, :].squeeze()

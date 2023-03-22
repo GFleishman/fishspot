@@ -65,7 +65,7 @@ def filter_by_range(spots, origin, span):
     # operate on a copy, filter lower/upper range all axes
     result = np.copy(spots)
     for i in range(3):
-        result = result[result[:, i] > origin[i] - 1]
+        result = result[result[:, i] >= origin[i]]
         result = result[result[:, i] < origin[i] + span[i]]
     return result
 
