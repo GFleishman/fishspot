@@ -2,7 +2,7 @@ import numpy as np
 import SimpleITK as sitk
 from scipy.ndimage import find_objects
 from scipy.ndimage import shift
-from scipy.ndimage import convolve
+from scipy.ndimage import spline_filter
 from scipy.ndimage import map_coordinates
 from scipy.ndimage import distance_transform_edt
 
@@ -53,12 +53,15 @@ def gravity_flow(
 
     Returns
     -------
-    
-    
-    """
+    counts : dict
+        The number of spots assigned to each mask segment. The segment indices are keys
+        and the values are the number of spots assigned to that segment index.
 
-    # TODO: add automatic stopping criteria based on percentage of spots assigned
-    #       that number should converge eventually
+    assignments : 1d-array
+        The index of the segment each spot was assigned to (0 is unassigned/background).
+        This array is parallel to the input spots array, meaning assignments[iii]
+        corresponds to spots[iii]
+    """
 
     # the constant mask density
     masks_binary = masks > 0
@@ -66,7 +69,8 @@ def gravity_flow(
 
     # unit mass
     unit_mass = np.zeros((3,) * masks.ndim)
-    unit_mass[(slice(1, 2),) * masks.ndim] = 1
+    unit_mass[(slice(1, 2),) * masks.ndim] = np.max(masks_edt)
+    unit_mass = spline_filter(unit_mass)
 
     # spots in voxel units
     coords = spots[:, :3] / spacing
@@ -84,11 +88,10 @@ def gravity_flow(
     linear_filter = distance_transform_edt(linear_filter, sampling=spacing)**-1
     x, y = np.partition(np.unique(linear_filter), -3)[-3:-1]
     linear_filter[center] = 2*y - x
-    linear_filter = linear_filter / np.sum(linear_filter)
     linear_filter_fft = np.fft.rfftn(np.fft.fftshift(linear_filter))
 
     # convert max_displacement to voxel units
-    max_displacement = np.max(max_displacement / spacing)
+    max_displacement = np.mean(max_displacement / spacing)
 
     # begin flow
     for iii in range(iterations):
@@ -98,7 +101,7 @@ def gravity_flow(
         centers = np.around(coords_updated).astype(int)
         deltas = coords_updated - centers
         for center, delta in zip(centers, deltas):
-            shifted_mass = shift(unit_mass, delta)
+            shifted_mass = shift(unit_mass, delta, prefilter=False)
             density[tuple(slice(c-1, c+2) for c in center)] += shifted_mass
 
         # convert to potential, then forces
@@ -117,24 +120,24 @@ def gravity_flow(
         out_of_bounds += np.any(displacements > (np.array(density.shape) - 2), axis=1)
         forces[out_of_bounds] = 0
 
+        # update coordinates
+        coords_updated = coords_updated + forces
+
         # count number of assigned spots
         x = np.around(coords_updated).astype(int)
         perc = np.sum(masks_binary[x[:, 0], x[:, 1], x[:, 2]]) / coords_updated.shape[0]
         print(f'iteration: {iii}    percent spots assigned: {perc}')
 
-        # update coordinates
-        coords_updated = coords_updated + forces
-
         # run callback function
         if callback is not None: callback(**locals())
 
+    # determine final assignments and number of spots per segment
     coords_updated = np.around(coords_updated).astype(int)
     assignments = masks[coords_updated[:, 0], coords_updated[:, 1], coords_updated[:, 2]]
-    counts = np.zeros(masks.max(), dtype=np.uint16)
-    for assignment in assignments:
-        if assignment > 0: counts[assignment - 1] += 1
+    counts = {x:0 for x in np.unique(masks)}
+    for assignment in assignments: counts[assignment] += 1
 
-    # TODO: add something which introspects the unassigned spot locations
+    # return
     return counts, assignments
 
 
