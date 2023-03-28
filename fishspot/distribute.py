@@ -6,6 +6,11 @@ from itertools import product
 import fishspot.filter as fs_filter
 import fishspot.psf as fs_psf
 import fishspot.detect as fs_detect
+from fishspot.assign import gravity_flow
+import tempfile
+import os
+import zarr
+from numcodecs import Blosc
 
 
 @cluster
@@ -137,4 +142,202 @@ def distributed_spot_detection(
 
     # return results
     return spots, psf
+
+
+@cluster
+def distributed_gravity_flow(
+    spots,
+    masks,
+    spacing,
+    iterations,
+    learning_rate,
+    max_displacement,
+    blocksize,
+    mask_density=1.0,
+    foreground_mask=None,
+    temporary_directory=None,
+    cluster=None,
+    cluster_kwargs={},
+    callback=None,
+):
+    """
+    Run the gravity_flow algorithm on blocks from a larger image.
+    Blocks overlap to ensure all spots have sufficient context.
+
+        Parameters
+    ----------
+    spots : 2d array, Nxd for N spots in d dimensions
+        The spots we want to assign
+
+    masks : arraylike (zarr or numpy array)
+        The multi-integer map of masks we want to assign spots to
+
+    spacing : 1d-array
+        The voxel spacing of the masks image
+
+    iterations : int
+        The number of iterations to run the flow
+
+    learning_rate : float
+        At each iteration the spot displacements will be scaled such that the
+        largest displacement of any spot will be equal to this number in micrometers
+
+    max_displacement : float
+        No spot will be allowed to displace larger than this amount in micrometers
+
+    blocksize : tuple
+        The number of voxels per axis that independent blocks should be
+
+    mask_density : float (default: 1.0)
+        A multiplier applied to the mask distance transform. If you want to increase
+        the mask-to-spot forces relative to the spot-to-spot forces, increase this number.
+        Alternatively if you want to decrease the mask-to-spot forces relative to the
+        spot-to-spot forces, decrease this number. Mask-to-spot forces promote assignment
+        and spot-to-spot forces promote clustering.
+
+    foreground_mask : ndarray (default: None)
+        A binary mask indicating which region of masks is foreground and requires
+        spot assignment. Does not need to be the same voxel dimensions as masks,
+        but should have the same physical domain.
+
+    temporary_directory : string (default: None)
+        Temporary files may be created. The temporary files will be in their own
+        folder within the `temporary_directory`. The default is the current
+        directory. Temporary files are removed if the function completes
+        successfully.
+
+    cluster : ClusterWrap.cluster object (default: None)
+        Only set if you have constructed your own static cluster. The default behavior
+        is to construct a cluster for the duration of this function, then close it
+        when the function is finished.
+
+    cluster_kwargs : dict (default: {})
+        Arguments passed to ClusterWrap.cluster
+        If working with an LSF cluster, this will be
+        ClusterWrap.janelia_lsf_cluster. If on a workstation
+        this will be ClusterWrap.local_cluster.
+        This is how distribution parameters are specified.
+
+    callback : function (default: None)
+        Any function you want to be run at the end of each iteration.
+
+    Returns
+    -------
+    counts : dict
+        The number of spots assigned to each mask segment. The segment indices are keys
+        and the values are the number of spots assigned to that segment index.
+
+    assignments : 1d-array
+        The index of the segment each spot was assigned to (0 is unassigned/background).
+        This array is parallel to the input spots array, meaning assignments[iii]
+        corresponds to spots[iii]
+    """
+
+    # create temporary directory, save spots there
+    temporary_directory = tempfile.TemporaryDirectory(
+        prefix='.', dir=temporary_directory or os.getcwd(),
+    )
+    np.save(temporary_directory.name + '/spots.npy', spots)
+
+    # ensure masks are a zarr array
+    if not isinstance(masks, zarr.Array):
+        masks_zarr_path = temporary_directory.name + '/masks.zarr'
+        masks_zarr = zarr.open(
+            masks_zarr_path, 'w',
+            shape=masks.shape,
+            chunks=blocksize,
+            dtype=masks.dtype,
+            compressor=Blosc(cname='zstd', clevel=4, shuffle=Blosc.BITSHUFFLE),
+        )
+        masks_zarr[...] = masks
+    else: masks_zarr = masks
+
+    # determine image slices for blocking
+    blocksize = np.array(blocksize)
+    nblocks = np.ceil(np.array(masks.shape) / blocksize).astype(int)
+    overlaps = np.ceil(2 * max_displacement / spacing).astype(int)
+    indices, slices = [], []
+    for (i, j, k) in np.ndindex(*nblocks):
+        start = blocksize * (i, j, k) - overlaps
+        stop = start + blocksize + 2 * overlaps
+        start = np.maximum(0, start)
+        stop = np.minimum(masks.shape, stop)
+        coords = tuple(slice(x, y) for x, y in zip(start, stop))
+
+        foreground = True
+        if foreground_mask is not None:
+            start = blocksize * (i, j, k)
+            stop = start + blocksize
+            ratio = np.array(foreground_mask.shape) / masks.shape
+            start = np.round( ratio * start ).astype(int)
+            stop = np.round( ratio * stop ).astype(int)
+            foreground_crop = foreground_mask[tuple(slice(x, y) for x, y in zip(start, stop))]
+            if not np.any(foreground_crop): foreground = False
+
+        if foreground:
+            indices.append((i, j, k))
+            slices.append(coords)
+
+    # closure for spot detection function
+    def gravity_flow_block(index, slices):
+
+        # print some feedback
+        print("Block index: ", index, "\nSlices: ", slices, flush=True)
+
+        # read the mask and spots data
+        masks = masks_zarr[slices]
+        spots = np.load(temporary_directory.name + '/spots.npy')
+
+        # get all spots for the roi
+        start = [x.start + 1 for x in slices] * spacing
+        stop = [x.stop - 2 for x in slices] * spacing
+        included = np.all(spots >= start, axis=1) * np.all(spots <= stop, axis=1)
+        spots = spots[included]
+
+        # flag spots that are in the overlap regions
+        start = blocksize * index * spacing
+        stop = start + blocksize * spacing
+        outer_spots = np.any((spots < start) + (spots >= stop), axis=1)
+
+        # rebase spot coordinates to cropped origin
+        origin = [x.start for x in slices] * spacing
+        spots = spots - origin
+
+        # run spot assignment
+        counts, raw_assignments = gravity_flow(
+            spots,
+            masks,
+            spacing,
+            iterations,
+            learning_rate,
+            max_displacement,
+            mask_density=mask_density,
+            callback=callback,
+        )
+
+        # print some feedback
+        print("COMPLETE\n", flush=True)
+
+        # remove overlap spots from result and reformat assignments
+        for osa in raw_assignments[outer_spots]: counts[osa] -= 1
+        assigned_indices = np.nonzero(included)[0][~outer_spots]
+        raw_assignemnts = raw_assignments[~outer_spots]
+        assignments = {x:y for x, y in zip(assigned_indices, raw_assignments)}
+
+        # return
+        return counts, assignments
+
+    # submit all alignments to cluster
+    results = cluster.client.gather(cluster.client.map(gravity_flow_block, indices, slices))
+
+    # merge all results
+    counts, assignments = results.pop(0)
+    for more_counts, more_assignments in results:
+        for index in more_counts.keys():
+            if index in counts.keys(): counts[index] += more_counts[index]
+            else: counts[index] = more_counts[index]
+        assignments = {**assignments, **more_assignments}
+
+    # return
+    return counts, assignments
 
