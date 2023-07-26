@@ -299,9 +299,23 @@ def distributed_gravity_flow(
         stop = start + blocksize * spacing
         outer_spots = np.any((spots < start) + (spots >= stop), axis=1)
 
+        # handle blocks that have no interior spots
+        if len(spots[~outer_spots]) == 0:
+            print("No spots, returning default", flush=True)
+            return {x:0 for x in np.unique(masks)}, {}
+
+        # handle blocks that have no masks
+        assigned_indices = np.nonzero(included)[0][~outer_spots]
+        if len(np.unique(masks)) == 1:
+            print("No masks, returning default", flush=True)
+            return {}, {x:0 for x in assigned_indices}
+
         # rebase spot coordinates to cropped origin
         origin = [x.start for x in slices] * spacing
         spots = spots - origin
+
+        # print some feedback
+        print("Number of spots: ", spots.shape[0], flush=True)
 
         # run spot assignment
         counts, raw_assignments = gravity_flow(
@@ -320,7 +334,6 @@ def distributed_gravity_flow(
 
         # remove overlap spots from result and reformat assignments
         for osa in raw_assignments[outer_spots]: counts[osa] -= 1
-        assigned_indices = np.nonzero(included)[0][~outer_spots]
         raw_assignemnts = raw_assignments[~outer_spots]
         assignments = {x:y for x, y in zip(assigned_indices, raw_assignments)}
 

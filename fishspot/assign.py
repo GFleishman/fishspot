@@ -5,6 +5,7 @@ from scipy.ndimage import shift
 from scipy.ndimage import spline_filter
 from scipy.ndimage import map_coordinates
 from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import gaussian_filter
 
 
 def gravity_flow(
@@ -14,6 +15,7 @@ def gravity_flow(
     iterations,
     learning_rate,
     max_displacement,
+    sigma=2.0,
     mask_density=1.0,
     callback=None,
 ):
@@ -65,11 +67,11 @@ def gravity_flow(
 
     # the constant mask density
     masks_binary = masks > 0
-    masks_edt = distance_transform_edt(masks_binary, sampling=spacing)
+    masks_edt = distance_transform_edt(masks, sampling=spacing)
 
     # unit mass
     unit_mass = np.zeros((3,) * masks.ndim)
-    unit_mass[(slice(1, 2),) * masks.ndim] = np.max(masks_edt)
+    unit_mass[(slice(1, 2),) * masks.ndim] = 1
     unit_mass = spline_filter(unit_mass)
 
     # spots in voxel units
@@ -105,14 +107,15 @@ def gravity_flow(
             density[tuple(slice(c-1, c+2) for c in center)] += shifted_mass
 
         # convert to potential, then forces
-        potential = np.fft.irfftn( np.fft.rfftn(density) * linear_filter_fft, density.shape)
+#        potential = np.fft.irfftn( np.fft.rfftn(density) * linear_filter_fft, density.shape)
+        potential = gaussian_filter(density, sigma / spacing)
         force_field = np.array(np.gradient(potential, *spacing)).transpose(1,2,3,0)
         for jjj in range(3):
             forces[..., jjj] = map_coordinates(force_field[..., jjj], coords_updated.transpose())
 
         # scale forces, convert to voxel units, truncate total displacements
         forces_mag = np.linalg.norm(forces, axis=-1)
-        forces = forces * (learning_rate / np.max(forces_mag) / spacing)
+        forces = forces * (learning_rate / np.mean(forces_mag) / spacing)
         displacements = coords_updated + forces
         too_far = np.linalg.norm(displacements - coords, axis=-1) > max_displacement
         forces[too_far] = 0

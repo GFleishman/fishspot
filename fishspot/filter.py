@@ -43,7 +43,7 @@ def rl_decon(image, psf, **kwargs):
     return rescale_intensity(decon, in_range=(0, 1), out_range=(0, mx))
 
 
-def apply_foreground_mask(spots, mask, ratio):
+def apply_foreground_mask(spots, mask, ratio=1):
     """
     """
 
