@@ -126,8 +126,40 @@ def remove_duplicates(spots1, spots2, radius, return_duplicate_indices=False):
         return spots1_filtered, spots2_filtered
 
 
-def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8):
+def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8.):
     """
+    Select a threshold for a unimodal histogram with the maximum deviation method.
+    This method draws a straight line from the peak/mode of the histogram to the
+    tail and then finds the point on the histogram between the peak and tail which
+    is maximally distant from this straight line.
+
+    Here the unimodal assumption is relaxed in two ways: the input histogram is
+    smoothed to remove high frequency noise and the peak is chosen to be the
+    rightmost mode of the histogram. That is the histogram may have more than one
+    mode, but it is assumed that there is a gradually decreasing tail to the right
+    of the final mode.
+
+    Parameters
+    ----------
+    image : nd-array
+        The data which we want to threshold
+
+    mask : nd-array (default: None)
+        A binary mask of image. Only voxels in the foreground will be considered.
+
+    winsorize : length 2 tuple (default: (1, 99))
+        The lower and upper percentiles to cut off from the histogram. This adds
+        robustness to outliers.
+
+    sigma : float (default: 8.)
+        The standard deviation of the gaussian applied to the histogram to smooth
+        high frequency components (extra modes/bumps due to noise).
+
+    Returns
+    -------
+        threshold : float
+            The maximum deviation threshold for the rightmost mode to tail of the
+            image histogram.
     """
 
     # function to get line from rightmost mode to endpoint
@@ -149,7 +181,7 @@ def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8):
         dists = np.min(cdist(curve_points, line_points), axis=1)
         point = np.argmax(dists) + peak
         if np.any(hist[point+1:-1] > hist[point]):  # tail should monotonically decrease
-            return peak + 1 + get_point(hist[peak+1:], edges[peak+1])
+            return peak + 1 + get_point(hist[peak+1:], edges[peak+1:])
         return point
 
     # get histogram, get point, return threshold
