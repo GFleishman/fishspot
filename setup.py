@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name="fishspot",
-    version="0.4.0",
+    version="0.5.0",
     author="Greg M. Fleishman",
     author_email="greg.nli10me@gmail.com",
     description="Tools for finding discrete bright spots in images",
