@@ -11,16 +11,18 @@ import tempfile
 import os
 import zarr
 from numcodecs import Blosc
+from scipy.ndimage import gaussian_filter
 
 
 @cluster
 def distributed_spot_detection(
     array, blocksize,
+    gaussian_sigma=None,
     white_tophat_args={},
     psf_estimation_args={},
     deconvolution_args={},
     spot_detection_args={},
-    intensity_threshold=0,
+    intensity_threshold=None,
     mask=None,
     psf=None,
     psf_retries=3,
@@ -50,10 +52,6 @@ def distributed_spot_detection(
                  spot_detection_args['max_radius'],]
     overlap = int(2*max(np.max(x) for x in all_radii))
 
-    # don't detect spots in the overlap region
-    if 'exclude_border' not in spot_detection_args:
-        spot_detection_args['exclude_border'] = overlap
-
     # compute mask to array ratio
     if mask is not None:
         ratio = np.array(mask.shape) / array.shape
@@ -62,56 +60,92 @@ def distributed_spot_detection(
     # compute number of blocks
     nblocks = np.ceil(np.array(array.shape) / blocksize).astype(int)
 
-    # determine indices for blocking
-    indices, psfs = [], []
-    for (i, j, k) in product(*[range(x) for x in nblocks]):
-        start = np.array(blocksize) * (i, j, k) - overlap
+    # determine coordinates for blocking
+    overlap_coords, core_coords = [], []
+    blocksize = np.array(blocksize)
+    for index in np.ndindex(*nblocks):
+
+        # determine if block is in foreground
+        if mask is not None:
+            mo = stride * index
+            mask_slice = tuple(slice(x, x+y) for x, y in zip(mo, stride))
+            if not np.any(mask[mask_slice]): continue
+
+        # create overlap coords and append to list
+        start = blocksize * index - overlap
         stop = start + blocksize + 2 * overlap
         start = np.maximum(0, start)
         stop = np.minimum(array.shape, stop)
         coords = tuple(slice(x, y) for x, y in zip(start, stop))
+        overlap_coords.append(coords)
 
-        # determine if block is in foreground
-        if mask is not None:
-            mo = stride * (i, j, k)
-            mask_slice = tuple(slice(x, x+y) for x, y in zip(mo, stride))
-            if not np.any(mask[mask_slice]): continue
+        # create core coords and append to list
+        start = blocksize * index
+        stop = start + blocksize
+        stop = np.minimum(array.shape, stop)
+        coords = tuple(slice(x, y) for x, y in zip(start, stop))
+        core_coords.append(coords)
 
-        # add coordinate slices to list
-        indices.append(coords)
-        psfs.append(psf)
+    # make a parallelizable list of psfs, works better for cluster.client.map
+    psfs = [psf,] * len(overlap_coords)
 
     # pipeline to run on each block
-    def detect_spots_pipeline(coords, psf):
+    def detect_spots_pipeline(overlap_coord, core_coord, psf, intensity_threshold):
 
-        # load data, background subtract, deconvolve, detect blobs
-        block = array[coords]
-        wth = fs_filter.white_tophat(block, **white_tophat_args)
+        # print feedback
+        print(f'PROCESSING REGION: {overlap_coord}', flush=True)
+
+        # load data
+        block = array[overlap_coord]
+        processed_block = np.copy(block)
+
+        # background subtraction
+        processed_block = fs_filter.white_tophat(processed_block, **white_tophat_args)
+
+        # optional smoothing, Note: should only be with extremely small sigmas
+        if gaussian_sigma is not None:
+            processed_block = gaussian_filter(processed_block, gaussian_sigma)
+
+        # automated psf estimation with error handling, then deconvolve
         if psf is None:
-            # automated psf estimation with error handling
             for i in range(psf_retries):
                 try:
-                    psf = fs_psf.estimate_psf(wth, **psf_estimation_args)
+                    psf = fs_psf.estimate_psf(processed_block, **psf_estimation_args)
                 except ValueError:
                     if 'inlier_threshold' not in psf_estimation_args:
                         psf_estimation_args['inlier_threshold'] = 0.9
                     psf_estimation_args['inlier_threshold'] -= 0.1
                 else: break
-        decon = fs_filter.rl_decon(wth, psf, **deconvolution_args)
-        spots = fs_detect.detect_spots_log(decon, **spot_detection_args)
+        processed_block = fs_filter.rl_decon(processed_block, psf, **deconvolution_args)
+
+        # final spot detection
+        spots = fs_detect.detect_spots_log(processed_block, **spot_detection_args)
+        print(f'INITIAL SPOTS ARRAY SHAPE: {spots.shape}', flush=True)
 
         # if no spots are found, ensure consistent format
         if spots.shape[0] == 0:
             return np.zeros((0, 7)), psf
         else:
+            # remove spots found in the overlap region
+            origin = [x.start-y.start for x, y in zip(core_coord, overlap_coord)]
+            span = [x.stop-x.start for x in core_coord]
+            spots = fs_filter.filter_by_range(spots, origin, span)
+            print(f'SPOTS ARRAY SHAPE AFTER OVERLAP REMOVAL: {spots.shape}', flush=True)
+
+            # get an intensity threshold
+            if intensity_threshold is None:
+                intensity_threshold = fs_filter.maximum_deviation_threshold(block)
+            print(f'USING INTENSITY THRESHOLD: {intensity_threshold}', flush=True)
+
             # append image intensities
             spot_coords = spots[:, :3].astype(int)
             intensities = block[spot_coords[:, 0], spot_coords[:, 1], spot_coords[:, 2]]
             spots = np.concatenate((spots, intensities[..., None]), axis=1)
             spots = spots[ spots[..., -1] > intensity_threshold ]
+            print(f'SPOTS ARRAY SHAPE AFTER THRESHOLD: {spots.shape}', flush=True)
 
             # adjust for block origin
-            origin = np.array([x.start for x in coords])
+            origin = np.array([x.start for x in overlap_coord])
             spots[:, :3] = spots[:, :3] + origin
             return spots, psf
     # END: CLOSURE
@@ -123,7 +157,13 @@ def distributed_spot_detection(
 
     # submit all alignments to cluster
     spots_and_psfs = cluster.client.gather(
-        cluster.client.map(detect_spots_pipeline, indices, psfs)
+        cluster.client.map(
+            detect_spots_pipeline,
+            overlap_coords,
+            core_coords,
+            psfs,
+            intensity_threshold=intensity_threshold,
+        )
     )
 
     # reformat to single array of spots and single psf
@@ -153,6 +193,7 @@ def distributed_gravity_flow(
     learning_rate,
     max_displacement,
     blocksize,
+    preprocessing_steps=[],
     mask_density=1.0,
     foreground_mask=None,
     temporary_directory=None,
@@ -187,6 +228,14 @@ def distributed_gravity_flow(
 
     blocksize : tuple
         The number of voxels per axis that independent blocks should be
+
+    preprocessing_steps : list of tuples (default: [])
+        Preprocessing steps to run on blocks before running gravity flow. This might
+        include things like resampling or smoothing. The correct format is:
+            preprocessing_steps = [(pp1, {'arg1':val1}), (pp2, {'arg1':val1}), ...]
+        Where `pp1` and `pp2` are functions; the first argument to each function
+        should be an ndarray (which will be the masks block). The second item in each
+        tuple is a dictionary containing the arguments to that function.
 
     mask_density : float (default: 1.0)
         A multiplier applied to the mask distance transform. If you want to increase
@@ -227,10 +276,9 @@ def distributed_gravity_flow(
         The number of spots assigned to each mask segment. The segment indices are keys
         and the values are the number of spots assigned to that segment index.
 
-    assignments : 1d-array
+    assignments : dict
         The index of the segment each spot was assigned to (0 is unassigned/background).
-        This array is parallel to the input spots array, meaning assignments[iii]
-        corresponds to spots[iii]
+        The spot indices are keys and the values are the mask the spot was assigned to.
     """
 
     # create temporary directory, save spots there
@@ -255,7 +303,7 @@ def distributed_gravity_flow(
     # determine image slices for blocking
     blocksize = np.array(blocksize)
     nblocks = np.ceil(np.array(masks.shape) / blocksize).astype(int)
-    overlaps = np.ceil(2 * max_displacement / spacing).astype(int)
+    overlaps = np.ceil(1.05 * max_displacement / spacing).astype(int)
     indices, slices = [], []
     for (i, j, k) in np.ndindex(*nblocks):
         start = blocksize * (i, j, k) - overlaps
@@ -278,8 +326,8 @@ def distributed_gravity_flow(
             indices.append((i, j, k))
             slices.append(coords)
 
-    # closure for spot detection function
-    def gravity_flow_block(index, slices):
+    # closure for spot assignment function
+    def gravity_flow_block(index, slices, spacing):
 
         # print some feedback
         print("Block index: ", index, "\nSlices: ", slices, flush=True)
@@ -289,8 +337,8 @@ def distributed_gravity_flow(
         spots = np.load(temporary_directory.name + '/spots.npy')
 
         # get all spots for the roi
-        start = [x.start + 1 for x in slices] * spacing
-        stop = [x.stop - 2 for x in slices] * spacing
+        start = [x.start + 3 for x in slices] * spacing
+        stop = [x.stop - 4 for x in slices] * spacing
         included = np.all(spots >= start, axis=1) * np.all(spots <= stop, axis=1)
         spots = spots[included]
 
@@ -317,6 +365,13 @@ def distributed_gravity_flow(
         # print some feedback
         print("Number of spots: ", spots.shape[0], flush=True)
 
+        # preprocess the masks
+        masks_original_shape = masks.shape
+        for pp_step in preprocessing_steps:
+            masks = pp_step[0](masks, **pp_step[1])
+        if not masks.shape == masks_original_shape:
+            spacing = np.array(spacing) * masks_original_shape / masks.shape
+
         # run spot assignment
         counts, raw_assignments = gravity_flow(
             spots,
@@ -341,7 +396,13 @@ def distributed_gravity_flow(
         return counts, assignments
 
     # submit all alignments to cluster
-    results = cluster.client.gather(cluster.client.map(gravity_flow_block, indices, slices))
+    results = cluster.client.gather(
+        cluster.client.map(
+            gravity_flow_block,
+            indices,
+            slices,
+            spacing=spacing,
+    ))
 
     # merge all results
     counts, assignments = results.pop(0)
