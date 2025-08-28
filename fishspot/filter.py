@@ -27,8 +27,8 @@ def rl_decon(image, psf, **kwargs):
     """
 
     # normalize image
-    mx = image.max()
-    norm_image = rescale_intensity(image, in_range=(0, mx), out_range=(0, 1))
+    mn, mx = image.min(), image.max()
+    norm_image = rescale_intensity(image, in_range=(mn, mx), out_range=(0, 1))
 
     # set some defaults
     if 'num_iter' not in kwargs:
@@ -38,9 +38,18 @@ def rl_decon(image, psf, **kwargs):
     if 'filter_epsilon' not in kwargs:
         kwargs['filter_epsilon'] = 1e-6
 
+    # pad the input based on psf size
+    pad = tuple((x//2 + 2,)*2 for x in psf.shape)
+    norm_image = np.pad(norm_image, pad, mode='reflect')
+
     # run decon, renormalize, return
     decon = richardson_lucy(norm_image, psf, **kwargs)
-    return rescale_intensity(decon, in_range=(0, 1), out_range=(0, mx))
+
+    # remove the pad
+    crop = tuple(slice(x[0], -x[1]) for x in pad)
+    decon = decon[crop]
+
+    return rescale_intensity(decon, in_range=(0, 1), out_range=(mn, mx))
 
 
 def apply_foreground_mask(spots, mask, ratio=1):
