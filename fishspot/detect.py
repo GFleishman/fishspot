@@ -13,10 +13,15 @@ def detect_spots_log(
     min_radius,
     max_radius,
     num_sigma=5,
+    normalize=False,
     **kwargs,
 ):
     """
     """
+
+    # normalize intensities
+    if normalize:
+        image = (image - np.mean(image)) / np.std(image)
 
     # ensure iterable radii
     if not isinstance(min_radius, (tuple, list, np.ndarray)):
@@ -30,9 +35,10 @@ def detect_spots_log(
     kwargs['num_sigma'] = num_sigma
 
     # set additional defaults
-    if 'threshold' not in kwargs or kwargs['threshold'] is None:
-        kwargs['threshold'] = None
-        kwargs['threshold_rel'] = 0.1
+    if 'threshold' not in kwargs and 'threshold_rel' not in kwargs:
+        kwargs['threshold'] = 1e-6
+    if 'overlap' not in kwargs:
+        kwargs['overlap'] = 1.0
 
     # run
     return blob_log(image, **kwargs)
