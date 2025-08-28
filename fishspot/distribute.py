@@ -23,6 +23,7 @@ def distributed_spot_detection(
     deconvolution_args={},
     spot_detection_args={},
     intensity_threshold=None,
+    intensity_threshold_minimum=0,
     mask=None,
     psf=None,
     psf_retries=3,
@@ -135,6 +136,7 @@ def distributed_spot_detection(
             # get an intensity threshold
             if intensity_threshold is None:
                 intensity_threshold = fs_filter.maximum_deviation_threshold(block)
+                intensity_threshold = max(intensity_threshold, intensity_threshold_minimum)
             print(f'USING INTENSITY THRESHOLD: {intensity_threshold}', flush=True)
 
             # append image intensities
