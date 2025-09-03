@@ -135,7 +135,7 @@ def distributed_spot_detection(
 
             # get an intensity threshold
             if intensity_threshold is None:
-                intensity_threshold = fs_filter.maximum_deviation_threshold(block)
+                intensity_threshold = fs_filter.maximum_deviation_threshold(block, winsorize=(1, 99.995))
                 intensity_threshold = max(intensity_threshold, intensity_threshold_minimum)
             print(f'USING INTENSITY THRESHOLD: {intensity_threshold}', flush=True)
 
