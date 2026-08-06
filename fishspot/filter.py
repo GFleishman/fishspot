@@ -1,10 +1,15 @@
+import logging
 import numpy as np
+
 from skimage.morphology import white_tophat as skimage_white_tophat
 from skimage.exposure import rescale_intensity
 from skimage.restoration import richardson_lucy
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from scipy.ndimage import gaussian_filter
+
+
+logger = logging.getLogger(__name__)
 
 
 def white_tophat(image, radius):
@@ -150,7 +155,7 @@ def remove_duplicates(spots1, spots2, radius, return_duplicate_indices=False):
         return spots1_filtered, spots2_filtered
 
 
-def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8., recurse=False):
+def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8., max_steps=1000):
     """
     Select a threshold for a unimodal histogram with the maximum deviation method.
     This method draws a straight line from the peak/mode of the histogram to the
@@ -179,45 +184,70 @@ def maximum_deviation_threshold(image, mask=None, winsorize=(1, 99), sigma=8., r
         The standard deviation of the gaussian applied to the histogram to smooth
         high frequency components (extra modes/bumps due to noise).
 
-    recurse : bool (default: False)
-        If True this function is called recursively to guarantee that the tail to
-        the right of the found point monotonically decreases. This can cause very
-        long run times and is very sensitive to noise.
+    max_steps : int (default: 1000)
+        Safety cap on the number of get_line/get_point iterations. Each iteration
+        shrinks the working histogram by at least one bin, so convergence within
+        len(histogram) steps is guaranteed; this cap just bounds the worst-case
+        run time for very large or pathological histograms. If the cap is hit,
+        -1 is returned instead of a threshold.
 
     Returns
     -------
         threshold : float
             The maximum deviation threshold for the rightmost mode to tail of the
-            image histogram.
+            image histogram. -1 if no threshold could be determined.
     """
 
     # function to get line from rightmost mode to endpoint
+    # iterative, not recursive, and capped at max_steps: each step shrinks
+    # hist/edges by at least one element, so this is guaranteed to terminate
+    # within len(hist) steps, but the recursive version this replaced could
+    # blow Python's call stack on histograms needing hundreds of steps to
+    # bound (e.g. a wide, noisy or multi-modal intensity histogram).
     def get_line(hist, edges):
-        peak = np.argmax(hist)
-        slope = (hist[peak] - hist[-1]) / (edges[peak] - edges[-1])
-        intercept = hist[peak] - slope * edges[peak]
-        line = slope * edges[peak:] + intercept
-        if np.any(hist[peak+1:-1] > line[1:-1]):  # line should bound histogram
-            new_peak, line = get_line(hist[peak+1:], edges[peak+1:])
-            return peak + 1 + new_peak, line
-        return peak, line
+        offset = 0
+        for _ in range(max_steps):
+            peak = np.argmax(hist)
+            slope = (hist[peak] - hist[-1]) / (edges[peak] - edges[-1])
+            intercept = hist[peak] - slope * edges[peak]
+            line = slope * edges[peak:] + intercept
+            if not np.any(hist[peak+1:-1] > line[1:-1]):  # line should bound histogram
+                return offset + peak, line
+            offset += peak + 1
+            hist = hist[peak+1:]
+            edges = edges[peak+1:]
+        return None, None
 
     # a function to get the threshold point from curve and line segment
     def get_point(hist, edges):
-        peak, line = get_line(hist, edges)
-        line_points = np.vstack((edges[peak:], line)).T
-        curve_points = np.vstack((edges[peak:], hist[peak:])).T
-        dists = np.min(cdist(curve_points, line_points), axis=1)
-        point = np.argmax(dists) + peak
-        if recurse and np.any(hist[point+1:-1] > hist[point]):  # tail should monotonically decrease
-            return peak + 1 + get_point(hist[peak+1:], edges[peak+1:])
-        return point
+        offset = 0
+        for _ in range(max_steps):
+            peak, line = get_line(hist, edges)
+            if peak is None:
+                return None
+            line_points = np.vstack((edges[peak:], line)).T
+            curve_points = np.vstack((edges[peak:], hist[peak:])).T
+            dists = np.min(cdist(curve_points, line_points), axis=1)
+            point = np.argmax(dists) + peak
+            if np.all(hist[point+1:-1] <= hist[point]):  # tail should monotonically decrease
+                return offset + point
+            offset += peak + 1
+            hist = hist[peak+1:]
+            edges = edges[peak+1:]
+        return None
 
     # get histogram, get point, return threshold
     foreground = image[mask > 0] if mask is not None else image
     mn, mx = np.percentile(foreground, winsorize).astype(int)
-    hist, edges = np.histogram(foreground, bins=mx - mn, range=(mn, mx), density=True)
+    logger.info(f'Foreground min/max: {mn}/{mx}')
+    if mx <= mn:
+        # this can apparently happen when blocks with no foreground info are passed to the worker
+        return -1
+    hist, edges = np.histogram(foreground, bins=mx-mn, range=(mn, mx), density=True)
     hist = gaussian_filter(hist, sigma=sigma)
     edges = edges[1:]
-    return edges[get_point(hist, edges)]
-
+    point = get_point(hist, edges)
+    if point is None:
+        logger.info(f'Peak search did not converge within {max_steps} steps; no threshold found')
+        return -1
+    return edges[point]
